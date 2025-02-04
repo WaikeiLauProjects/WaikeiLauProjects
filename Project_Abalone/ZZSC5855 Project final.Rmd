@@ -1,0 +1,348 @@
+---
+---
+---
+
+### Library
+
+```{r, message=FALSE}
+
+library(here)
+library(CCA)
+library(CCP)
+library(scatterplot3d)
+library(mvtnorm)
+library(car)
+library(expm)
+library(GGally)
+library(e1071)
+library(MVN)
+library(dplyr)
+library(readr)
+library(purrr)
+library(heplots)
+library(forcats)
+library(pROC)
+
+select <- dplyr::select
+```
+
+### Exploratory data analysis
+
+```{r, message=FALSE}
+abalone <- read.csv("D:\\General\\abalone\\abalone.csv")
+summary(abalone)
+```
+
+```{r, message=FALSE}
+ggpairs(as.data.frame(abalone))
+ggpairs(as.data.frame(abalone), aes(colour=Sex, alpha=0.7))
+```
+
+### Data Preparation
+
+(Remove outliers, Transform)
+
+```{r, message=FALSE}
+abalone <- subset(abalone, abalone$Height > mean(abalone$Height)-4*sd(abalone$Height) & abalone$Height < mean(abalone$Height)+4*sd(abalone$Height))
+
+ab_trans <- cbind(Sex=abalone$Sex, Length=(max(abalone[,2]+1)-abalone[,2])^(1/2), Diameter=(max(abalone[,3]+1)-abalone[,3])^(1/2), Height=abalone[,4], (abalone[,5:9])^(1/2))
+
+mvn(ab_trans[,-1], mvnTest="mardia", univariateTest = "SW")
+```
+
+```{r, message=FALSE}
+
+ggpairs(as.data.frame(ab_trans))
+ggpairs(as.data.frame(ab_trans), aes(colour=Sex, alpha=0.7))
+```
+
+Two outliers were been removed to reduce the kurtosis of the Height variable. Additionally, a root power transform was implemented for each variable to reduce skew and achieve a more Gaussian distribution. <https://www.datanovia.com/en/lessons/transform-data-to-normal-distribution-in-r/>
+
+### Initial observations
+
+There is *high correlation* between the quantitative variables. These can be classed into three groups based on the scale of measurement: size (Length, Diameter, Height), weight (Whole wt., Shucked wt., Viscera wt., Shell wt.) and age (integer). For this data, high correlation within and between each group makes sense. The Mardia and Shapiro-Wilk's diagnostics indicate that despite the transformation, the resulting dataset is not consistent with normality. However, given the large sample size, this transformation is likely adequate for most statistical procedures.
+
+# *Question 1*
+
+One approach to predict the sex of abalone is the use of classification techniques. These include Linear Discriminant Analysis (LDA), Quadratic Discriminant Analysis (QDA), and Support Vector Machines (SVM).
+
+##### LDA Assumptions \*
+
+-   Normally distributed and a class-specific mean vector
+
+-   Each category has equal covariance matrices
+
+##### QDA Assumptions \*
+
+-   Observations drawn from normal distribution
+
+-   Each category has different covariance matrices
+
+##### SVM Assumptions
+
+-   Margins should be as large as possible
+
+-   Support vectors are the most useful data points (as they are most likely to be incorrectly classified)
+
+Source\* <https://thatdatatho.com/assumption-checking-lda-vs-qda-r-tutorial-2/>
+
+### Test for Homogeneity of Covariance Matrices
+
+Equal covariance assumption will determine what type of classifier is most suitable for this data set. A visual inspection of the boxplots for Sex vs Length, Sex vs Diameter, and Sex vs Height show similar variance between the sex categories.
+
+```{r}
+boxM(ab_trans[,2:4],ab_trans$Sex)
+```
+
+<https://www.statisticshowto.com/boxs-m-test/>
+
+The Box's M-test returns a significant result indicating the covariance matrices are not homogeneous. It should be noted that the Box's M-test is extremely sensitive to departures from normality. In the case where neither normality nor homogeneity of co-variances are satisfied, the most appropriate classifier is Support Vector Machines.
+
+### Preparing Categorical Data
+
+```{r}
+all<-female<-male<-infant<- abalone %>% select(Sex,Length,Diameter,Height) %>% mutate(Sex=factor(Sex))
+
+female$Sex <- fct_collapse(female$Sex, Other = c("M","I"))
+
+male$Sex <- fct_collapse(male$Sex, Other = c("F","I"))
+
+infant$Sex <- fct_collapse(infant$Sex, Other = c("F","M"))
+```
+
+In preparing for SVM, the data was transformed using a *One-against-rest* approach where the probability of each category was predicted against all others. As such, four data sets were created with alterations to the Sex categories as per below:
+
+-   Set 1: Sex categories unchanged
+
+-   Set 2: Non-Females categories classified as "Others"
+
+-   Set 3: Non-Males categories classified as "Others"
+
+-   Set 4: Non-Infants categories classified as "Others"
+
+### Tuning SVM
+
+```{r}
+#summary(tune.rad <- tune.svm(Sex~Height+Diameter+Length, data=all, kernel="radial", gamma = 10^(-1:0), cost = 10^(-1:0)))
+
+#summary(tune.sig <- tune.svm(Sex~Height+Diameter+Length, data=all, kernel="sigmoid"))
+
+#tune.rad$best.performance
+#tune.sig$best.performance
+```
+
+The tuning results indicated that radial kernel had the best performance, while sigmoid kernels produced the lowest number of support vectors with a trade-off on performance. We determined that radial kernel was preferable on the data without producing "too many" support vectors. In the interest of limited computing power, the cost penalty was kept at 0.1.
+
+### Fitting SVM
+
+```{r}
+
+all.svm <- svm(Sex~Height+Diameter+Length, data=all, kernel="radial", cross=10)
+female.svm <- svm(Sex~Height+Diameter+Length, data=female, kernel="radial", cross=10)
+male.svm <- svm(Sex~Height+Diameter+Length, data=male, kernel="radial", cross=10)
+infant.svm <- svm(Sex~Height+Diameter+Length, data=infant, kernel="radial", cross=10)
+
+summary(all.svm)
+plot(all.svm, data=all, Diameter~Length)
+summary(female.svm)
+plot(female.svm, data=female, Diameter~Length)
+summary(male.svm)
+plot(male.svm, data=male, Diameter~Length)
+summary(infant.svm)
+plot(infant.svm, data=infant, Diameter~Length)
+```
+
+In a 10-fold cross validation of the tuned radial SVM, the *One-against-rest* approach demonstrated significantly better accuracy in the presence of greater than 2 categories.
+
+-   51% accuracy \~ Female/Male/Infant
+
+-   68% accuracy \~ Female/Other
+
+-   63% accuracy \~ Male/Other
+
+-   79% accuracy \~ Infant/Other
+
+### Prediction
+
+Using the SVM to predict the Sex of an abalone with Height=45, Length=120, Diameter=90. The predicted category is Male.
+
+```{r}
+
+predict(all.svm, newdata=data.frame(Height=45, Length=120, Diameter=90), decision.values = TRUE)
+```
+
+### Testing of accuracy
+
+```{r, message=FALSE}
+
+female.predict <- c(attr(predict(female.svm, newdata = female, decision.values = TRUE), "decision.values"))
+female.roc <- roc(female$Sex=="F", female.predict)
+
+male.predict <- c(attr(predict(male.svm, newdata = male, decision.values = TRUE), "decision.values"))
+male.roc <- roc(male$Sex=="M", male.predict)
+
+infant.predict <- c(attr(predict(infant.svm, newdata = infant, decision.values = TRUE), "decision.values"))
+infant.roc <- roc(infant$Sex=="I", infant.predict)
+
+plot(female.roc, col=2)
+plot(male.roc, col=3, add=TRUE)
+plot(infant.roc, col=4, add=TRUE)
+
+legend("bottomright", c("female svm", "male svm", "infant svm"), lty=1, col=2:4 )
+```
+
+To conclude on the classifier performance, we turn to the ROC curve with plots sensitivity vs specificity. Sensitivity is the proportion of true positives, while specificity is the proportion of true negatives. A perfect model would score 1 on both axis, creating a step, while a model that is little better than chance would straddle the diagonal line. We can see from the ROC curves our model performed significantly better when classifying infant abalone compared to male and female abalone. We see this was a result of the significant overlap in sizes for the mature adults and the type of measurements used. It would appear that while weight and size measurements are able to easily distinguish infant from adult abalone, that is not the case between male and female abalone as they are similar in size and weight.
+
+# *Question 2*
+
+One approach to predict the shucked and visceral weights of abalone from its size, is the use of canonical correlations. Canonical correlations measure the largest possible correlation between a linear combination of the variables in the first set and a linear combination of the variables in the second set.
+
+##### Canonical correlation assumptions \*
+
+-   variables are multivariate normal
+
+-   Large sample size
+
+-   absence of multicollinearity (variable correlations =1)
+
+\* <https://www.projectguru.in/performing-canonical-correlation-analysis-cca/>
+
+![](images/paste-95D6FDEB.png)
+
+Referring to the GGplot, the abalone data was root power transformed to approximate multivariate normality. The sample size is large and correlations are less than one (despite being high). We proceed with CC method by separating the variables into two related sets (size vs weight) and conduct a CC analysis.
+
+### Canonical Correlations
+
+```{r}
+X <- abalone[2:4]
+Y <- abalone[6:7]
+abalone.cc <- cc(X,Y)
+
+abalone.cc$cor
+abalone.cc$xcoef
+abalone.cc$ycoef
+```
+
+All coefficients corresponding to the highest canonical correlation are negative for each variable.
+
+```{r}
+plt.cc(abalone.cc, var.label = TRUE)
+```
+
+All weight and size variables scored highly (negative) along the first dimension, showing they are significant in determining that correlation. However, only weight plays a significant role in determining the second correlation. We now proceed to test the null hypothesis that no linear relationship between any of the size and weight variables.
+
+### Testing Linear Relationship
+
+```{r}
+n <- nrow(abalone)
+p <- ncol(X)
+q <- ncol(Y)
+p.asym(abalone.cc$cor, n, p, q, tstat="Wilks")
+```
+
+```{r}
+p.asym(abalone.cc$cor, n, p, q, tstat="Pillai")
+```
+
+```{r}
+p.asym(abalone.cc$cor, n, p, q, tstat="Roy")
+```
+
+As there is a significant indication of linear relationship for the weight and size variables
+
+### Prediction (Value)
+
+To predict the weight and value of abalone, we will utilise the first canonical correlation. Similar to Principal components, we can multiply the canonical coefficients by -1 without changing the interpretation of covariance and canonical correlations.
+
+```{r}
+
+cc_y <- cbind(abalone.cc$ycoef[1]*Y$Shucked.weight*-1,
+              abalone.cc$ycoef[2]*Y$Viscera.weight*-1)
+cc_x <- cbind(abalone.cc$xcoef[1]*X$Length*-1,
+              abalone.cc$xcoef[2]*X$Diameter*-1,
+              abalone.cc$xcoef[3]*X$Height*-1)
+
+cc_cov <- cov(cbind(cc_y,cc_x))
+
+rownames(cc_cov) <- colnames(cc_cov) <- c("Shucked.weight","Viscera.weight","Length", "Diameter","Height")
+
+cc_cov
+
+(Mu_y <- colMeans(cc_y))
+(Mu_x <- colMeans(cc_x))
+```
+
+Utilising the following property of the multivariate normal:
+
+$$
+Nr​(μ_{(1)}​+Σ_{12}​Σ_{22}^{−1}​(x_{(2)}​−μ_{(2)}​),Σ_{11}​−Σ_{12}​Σ_{22}^{−1}​Σ_{21}​)
+$$
+
+We can predict the weight and value of an abalone with Length=120, Diameter=90, Height=45, and assuming \$1/gram of shucked and viscera weight.
+
+```{r}
+
+ab1 <- (c(120, 90, 45)*abalone.cc$xcoef[1:3])*-1
+price <- c(1,1)
+
+weights <- Mu_y + (cc_cov[1:2,3:5]%*%solve(cc_cov[3:5,3:5])%*%as.matrix(ab1-Mu_x))
+
+#~~ reverse the transformation to the original data before obtaining price
+
+(weights <- weights^2)
+
+(value <- price%*%weights)
+```
+
+The estimated value of the abalone is \$3.45 with expected shucked and viscera weights of 1 and 2.45 grams respectively.
+
+### Prediction Interval (Value)
+
+A prediction interval for the true value of the abalone (90% of the time)
+
+$$
+n(y−μ)^{⊤}S^{−1}(y−μ)≤F_{1−α,p,n−p​}\frac{p}{n−p}​(n−1)
+$$
+
+```{r}
+
+y_cov<-cc_cov[1:2,1:2]
+
+y_cov.inv <- solve(y_cov)
+
+in_ellipsoid_y <- function(x){
+  q <- length(Mu_y)
+  n*(Mu_y-x)%*%y_cov.inv%*%(Mu_y-x) <=q*(n-1)/(n-q) * qf(0.9, q, n-q)
+}
+
+
+s <- seq(0.67, 0.7, length.out=100)
+v <- seq(0.95, 1.01, length.out=100)
+sv <- as.matrix(expand.grid(s,v))
+
+zz <- apply(sv, 1, in_ellipsoid_y)
+
+plot(sv[,1], sv[,2], col=zz, xlab="Shucked.weight", ylab="Viscera.weight", pch=".", asp=1)
+points(Mu_y[1], Mu_y[2], col=2)
+
+y_S.e <- eigen(y_cov)
+scl_y <- q*(n-1)/(n-q)*qf(0.9, q, n-q)/n
+
+#1st axis (largest)
+lines(rbind(Mu_y+y_S.e$vectors[,1]*sqrt(y_S.e$values[1]*scl_y), Mu_y-y_S.e$vectors[,1]*sqrt(y_S.e$values[1]*scl_y)))
+
+#2nd axis
+lines(rbind(Mu_y+y_S.e$vectors[,2]*sqrt(y_S.e$values[2]*scl_y), Mu_y-y_S.e$vectors[,2]*sqrt(y_S.e$values[2]*scl_y)))
+```
+
+The prediction interval is the ellipsoid with major and minor axis at the points
+
+```{r}
+pred_pts <- rbind(Mu_y+y_S.e$vectors[,1]*sqrt(y_S.e$values[1]*scl_y),
+Mu_y-y_S.e$vectors[,1]*sqrt(y_S.e$values[1]*scl_y),
+Mu_y+y_S.e$vectors[,2]*sqrt(y_S.e$values[2]*scl_y),
+Mu_y-y_S.e$vectors[,2]*sqrt(y_S.e$values[2]*scl_y))
+
+colnames(pred_pts) <- c("Shucked.weight","Viscera.weight")
+pred_pts
+```
