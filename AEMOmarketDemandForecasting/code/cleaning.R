@@ -1,0 +1,40 @@
+
+library(tsibble)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+
+Temp_NSW <- read.csv("./data/temperature_nsw.csv")
+Temp_NSW <- na.omit(Temp_NSW)
+Temp_NSW <- Temp_NSW[which(Temp_NSW$TEMPERATURE >=-500),]
+Temp_NSW$DATETIME <- ymd_hms(Temp_NSW$DATETIME)
+which(is.na(Temp_NSW$DATETIME))
+
+Demand_NSW <- read.csv("./data/demand 2018-2022.csv")
+Demand_NSW <- na.omit(Demand_NSW)
+Demand_NSW$DATETIME <- ymd_hms(Demand_NSW$DATETIME)
+which(is.na(Demand_NSW$DATETIME))
+
+Demand_NSW$Season <- ifelse(months(Demand_NSW$DATETIME) %in% month.name[c(12,1,2)], 'Summer',
+                            ifelse(months(Demand_NSW$DATETIME) %in% month.name[c(3,4,5)], 'Autumn',
+                                   ifelse(months(Demand_NSW$DATETIME) %in% month.name[c(6,7,8)], 'Winter',
+                                          'Spring')))
+
+Demand_NSW$Weekday <- lubridate::wday(Demand_NSW$DATETIME, label = TRUE)
+
+PublicHolidays <- as.data.frame(tsibble::holiday_aus(year = 2010:2022, state = "NSW"))
+
+PublicHolidays$day <- ifelse(wday(PublicHolidays$date) == 1, 1, ifelse(wday(PublicHolidays$date) == 7, 2,0))
+
+PublicHolidays$Obs <- PublicHolidays$date + PublicHolidays$day
+
+Demand_NSW$PubHol <- ifelse(as.Date(Demand_NSW$DATETIME,format = "%y-%m-%d") %in% PublicHolidays$Obs, 'Holiday', '' )
+
+Demand_NSW$Temp <- ifelse(Demand_NSW$DATETIME %in% Temp_NSW$DATETIME, Temp_NSW$TEMPERATURE, NA)
+
+Demand_NSW %>% fill(Temp)
+
+
+plot(Demand_NSW$DATETIME, Demand_NSW$TOTALDEMAND, type = 'l')
+
+

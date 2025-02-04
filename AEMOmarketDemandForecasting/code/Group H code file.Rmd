@@ -1,0 +1,248 @@
+---
+title: "Group H Capstone project"
+author: "Waikei"
+date: "2023-03-20"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#git add --all
+#git commit -m "update code"
+#git push
+#git push --set-upstream origin TrainTestSplit
+
+
+library(tsibble)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(sqldf)
+library(reticulate)
+library(readr)
+library(zoo)
+library(data.table)
+
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r load, include=FALSE}
+
+#~~~Read Tempurature~~~#
+Temp_NSW <- read.csv("../data/temperature_nsw.csv") %>%
+  na.omit() %>%
+  filter(TEMPERATURE >=-500) %>%
+  mutate(DATETIME = ymd_hms(DATETIME)) 
+# which(is.na(Temp_NSW$DATETIME))
+
+#~~~Read Demand~~~#
+Demand_NSW <- read_csv("../data/totaldemand_nsw.csv.zip", show_col_types = FALSE)  %>% #read from github
+  na.omit() %>%
+  mutate(DATETIME = ymd_hms(DATETIME),
+         Temp = ifelse(DATETIME %in% Temp_NSW$DATETIME, Temp_NSW$TEMPERATURE, NA)) %>% #Add Temperature (To Demand)#
+  fill(Temp) %>% select(-2) %>%
+  filter(DATETIME>='2020-06-15') #keep 1 year data
+
+#~~~Add Hourly Solar (To Demand)~~~#
+#Solar_5min <- read_csv('../data/solar.csv', show_col_types = FALSE) %>%
+#  mutate(SETTLEMENTDATE =  ymd_hms(SETTLEMENTDATE)) %>%
+#  select(1,4) %>%
+#  rename(DATETIME=SETTLEMENTDATE, Solar_MW=SS_SOLAR_CLEAREDMW) %>%
+#  mutate(Solar_MW = as.numeric(Solar_MW))
+
+#Demand_NSW <- Demand_NSW %>% left_join(Solar_5min, by=c('DATETIME'))
+
+```
+
+```{r load, include=FALSE}
+
+#~~~Create 30min Forecast DF from Demand~~~#
+# Demand_NSW <- Demand_NSW[!Demand_NSW$Solar_MW %in% c("NULL",NA),]
+
+Forecast_Data <- Demand_NSW %>% 
+  group_by(DATETIME=ceiling_date(DATETIME, "30 mins")) %>% summarise(
+  AvG30_Demand = mean(TOTALDEMAND, na.rm = TRUE), #~~average demand since last half hour
+  AvG30_Temp = mean(Temp, na.rm = TRUE) #~~average Temperature since last half hour
+  )%>% as.data.frame()
+
+
+#~~~Create rolling average metrics~~~#
+
+Forecast_Data <- Forecast_Data %>% left_join(Demand_NSW, by=c('DATETIME')) %>% mutate(
+  Day_Demand = rollmean(TOTALDEMAND, k=48, fill=NA, align='right'), #~~rolling avg demand 24hours
+  Day_Temp = rollmean(Temp, k=48, fill=NA, align='right'), #~~rolling avg Temperature 24hours
+  Week_Demand = rollmean(TOTALDEMAND, k=336, fill=NA, align='right'), #~~rolling avg demand 7 days
+  Week_Temp = rollmean(Temp, k=336, fill=NA, align='right') #~~rolling avg Temp 7 days
+  )
+
+Demand_NSW <- Demand_NSW[minute(Demand_NSW$DATETIME)%%30==0,]
+
+```
+
+```{r load, include=FALSE}
+
+#~~~Add Season (To 30min Forecast)~~~#
+#Forecast_Data$season <- ifelse(months(Forecast_Data$DATETIME) %in% month.name[c(12,1,2)], 4,
+#                               ifelse(months(Forecast_Data$DATETIME) %in% month.name[c(3,4,5)], 3,
+#                                      ifelse(months(Forecast_Data$DATETIME) %in% month.name[c(6,7,8)], 2,1)))
+
+
+#~~~Add Day of week (To 30min Forecast)~~~#
+Forecast_Data$Weekday<- lubridate::wday(Forecast_Data$DATETIME, label = FALSE)
+Forecast_Data$Month <- format(as.Date(Forecast_Data$DATETIME, format="%d/%m/%Y"),"%m")
+Forecast_Data$Time <- as.integer(format(as.POSIXct(Forecast_Data$DATETIME), format = "%H%M"))
+Forecast_Data$Lag1 <- c(NA, head(Forecast_Data$TOTALDEMAND, -1))
+Forecast_Data$Diff <- Forecast_Data$Lag1 - Forecast_Data$TOTALDEMAND
+
+#~~~Add Holidays (To 30min Forecast)~~~#
+PublicHolidays <- as.data.frame(tsibble::holiday_aus(year = 2010:2022, state = "NSW"))
+PublicHolidays$day <- ifelse(wday(PublicHolidays$date) == 1, 1, ifelse(wday(PublicHolidays$date) == 7, 2,0))
+PublicHolidays$Obs <- PublicHolidays$date + PublicHolidays$day
+Forecast_Data$PubHol <- ifelse(as.Date(Forecast_Data$DATETIME,format = "%y-%m-%d") %in% PublicHolidays$Obs, 1, 0)
+
+Forecast_Data <- na.omit(Forecast_Data)
+
+
+#~~~Add Daily rainfall (To 30min Forecast)~~~#
+#Rainfall_data <- read.csv.sql("../data/IDCJAC0009_066137_1800_Data Rainfall.csv",
+#                              sql="select * from file where Year >= 2010") %>% 
+#  na.omit(Rainfall_data)
+#Rainfall_data$Date <- as.Date(with(Rainfall_data,paste(Year, Month, Day, sep="-")), "%Y-%m-%d")
+#Rainfall_data <- Rainfall_data[c(9,6)]
+#colnames(Rainfall_data) = c("DATETIME", "Rainfall_mm_Day")
+#Forecast_Data <- Forecast_Data %>% left_join(Rainfall_data,by=c('DATETIME')) %>% fill(Rainfall_mm_Day)
+
+
+#~~~Add Daily Solar (To 30min Forecast)~~~#
+#Solar_data <- read.csv.sql("../data/IDCJAC0016_066137_1800_Data Solar.csv",
+#                       sql="select * from file where Year >= 2010")
+#Solar_data <- na.omit(Solar_data)
+#Solar_data$Date <- as.Date(with(Solar_data,paste(Year, Month, Day, sep="-")), "%Y-%m-%d")
+#Solar_data <- Solar_data[c(7,6)]
+#colnames(Solar_data) = c("DATETIME", "Total_Solar_Day")
+#Forecast_Data <- Forecast_Data %>% left_join(Solar_data,by=c('DATETIME')) %>% fill(Total_Solar_Day) %>% na.omit()
+
+#~~~Create target outputs for reinforcement learning~~~#
+name= paste("T+",1:336, sep="")
+
+for(i in 1:336){
+  Forecast_Data[[name[i]]] <- c(tail(Forecast_Data$Diff, -i), rep(NA, i))
+}
+
+# write.csv(Forecast_Data, '../data/consolidated.csv')
+print(Forecast_Data)
+```
+
+```{r, include=FALSE}
+
+#~~~Run this to install python packages for the first time~~~#
+#repl_python()
+#py_install('pandas')
+#py_install('numpy')
+#py_install('matplotlib')
+#py_install('seaborn')
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{python}
+
+#~~~MUST RESTART R SESSION TO REFRESH PYTHON ENVIRONMENT~~~#
+#py_Forecast_30m.iloc[0:0]
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import mean_absolute_error
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.multioutput import RegressorChain
+import time
+
+
+```
+
+```{python}
+#~~~create Train Test split for time series~~~#
+
+py_Forecast = r.Forecast_Data.set_index('DATETIME').sort_index()
+
+train_ratio = 0.7
+n_train = int(len(py_Forecast)*train_ratio)
+train, test = py_Forecast.iloc[:n_train,:], py_Forecast.iloc[n_train:,:]
+#test = py_Forecast.iloc[n_train:,:]
+train_x, train_y, test_x, test_y = train.iloc[:,:12], train.iloc[:,12:], test.iloc[:30,:12] , test.iloc[:30,12:]
+
+```
+
+```{python}
+
+model1 = RandomForestRegressor(n_estimators=10, max_depth = 5, min_samples_leaf = 10)
+
+start = time.time()
+chain1 = RegressorChain(base_estimator=model1).fit(train_x, train_y)
+stop = time.time()
+
+print(f"Model 1 Training time: {stop - start}s")
+
+model2 = RandomForestRegressor(n_estimators=100, max_depth = 5, min_samples_leaf = 10)
+
+start = time.time()
+chain2 = RegressorChain(base_estimator=model2).fit(train_x, train_y)
+stop = time.time()
+
+print(f"Model 2 Training time: {stop - start}s")
+
+
+model3 = RandomForestRegressor(n_estimators=10, max_depth = 10, min_samples_leaf = 10)
+
+
+start = time.time()
+chain3 = RegressorChain(base_estimator=model3).fit(train_x, train_y)
+stop = time.time()
+
+print(f"Model 3 Training time: {stop - start}s")
+
+```
+
+```{python}
+
+pred_y = pd.DataFrame(chain2.predict(test_x), columns = r.name)
+
+test_y.reset_index(drop=True, inplace=True)
+APE = abs(test_y-pred_y)/test_y
+cMAPE=[0]
+
+for i in range(len(APE.columns)):
+  cMAPE.append(APE.iloc[:,i].sum()+cMAPE[i])
+
+cMAPE.pop(0)
+
+for i in range(len(APE.columns)):
+  cMAPE[i] = cMAPE[i]/((i+1)*len(APE))
+  
+
+#for i in range(336):
+#  APE.append((abs(test_y.iloc[:,i]-pred_y.iloc[:,i])*100).divide(test_y.iloc[:,i], axis=0))
+#  cMAPE.append(sum(MAPE)/len(MAPE))
+print(len(cMAPE))
+print(cMAPE)
+
+#Total_MAPE = test_y.reshape(-1,1) - pred_y.reshape(-1,1)
+#sum((abs(test_y.iloc[:,1]-pred_y.iloc[:,1])*100).divide(test_y.iloc[:,1], axis=0))/len(test_y)
+
+```
+
+```{python}
+
+```
